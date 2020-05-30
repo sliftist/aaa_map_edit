@@ -1,7 +1,8 @@
 import * as fs from "fs";
 import * as zlib from "zlib";
-
 import * as zip from "jszip";
+
+const SPECIAL_PREFIX = "&&";
 
 function stripXmlComments(xml: string) {
     let output = "";
@@ -13,7 +14,7 @@ function stripXmlComments(xml: string) {
         if(!inComment) {
             output += xml[i];
         }
-        if(inComment && (xml.slice(i - "-->".length, i) === "-->")) {
+        if(inComment && (xml.slice(i - "-->".length + 1, i + 1) === "-->")) {
             inComment = false;
         }
     }
@@ -31,7 +32,7 @@ function parseRawTags(xml: string): string[] {
         let ch = xml[i];
         if(!specialTag && ch === "<") {
             if(typeof curTag === "string") {
-                throw new Error(`Starting new tag with old tag still open ${xml.slice(i, i + 100)}`);
+                throw new Error(`Starting new tag with old tag still open, ${xml.slice(i, i + 100)}`);
             }
             if(xml.slice(i, i + "<![".length) === "<![") {
                 specialTag = true;
@@ -41,9 +42,9 @@ function parseRawTags(xml: string): string[] {
         if(typeof curTag === "string") {
             curTag += ch;
         }
-        if(!specialTag && ch === ">" || specialTag && xml.slice(i - "]]>".length, i) === "]]>") {
+        if(!specialTag && ch === ">" || specialTag && xml.slice(i - "]]>".length + 1, i + 1) === "]]>") {
             if(curTag === undefined) {
-                throw new Error(`Ended tag, but not tag was open`);
+                throw new Error(`Ended tag, but tag was not opened, ${xml.slice(i, i + 100)}`);
             }
             tags.push(curTag);
             curTag = undefined;
@@ -103,11 +104,9 @@ function parseAttValue(text: string, index: { v: number }): string {
     return value;
 }
 
-const rawTextSymbol = Symbol("rawTextSymbol");
-
 function parseTagObj(tag: string): {
     rawTextOverride?: string;
-    startChars: string;
+    endChars: string,
     tagName: string;
     endSelf?: boolean;
     endParent?: boolean;
@@ -117,15 +116,15 @@ function parseTagObj(tag: string): {
 } {
     if(tag.startsWith("<![")) {
         return {
-            startChars: "",
+            endChars: "",
             tagName: "raw",
             endSelf: true,
             properties: { },
-            rawTextOverride: tag.slice(1, -1),
+            rawTextOverride: tag,
         };
     }
 
-    let startChars = "";
+    let endChars = "";
     let endSelf = false;
     let index = { v: 1 };
 
@@ -135,16 +134,10 @@ function parseTagObj(tag: string): {
         endParent = true;
     }
 
-    if(tag[index.v] === "?" || tag[index.v] === "!") {
-        startChars = tag[index.v];
-        endSelf = true;
-        index.v++;
-    }
-
     let tagName = parseAttName(tag, index);
     if(endParent) {
         return {
-            startChars: "",
+            endChars: "",
             tagName,
             endParent: true,
             properties: {},
@@ -158,6 +151,7 @@ function parseTagObj(tag: string): {
     while(index.v < tag.length) {
         let attName = parseAttName(tag, index);
         if(attName === "/") {
+            endChars = "/";
             endSelf = true;
             break;
         }
@@ -166,12 +160,16 @@ function parseTagObj(tag: string): {
         properties[attName] = value;
     }
 
+    if(tagName[0] === "?" || tagName[0] === "!") {
+        endSelf = true;
+    }
+
     return {
-        startChars,
         tagName,
         endParent,
         endSelf,
         properties,
+        endChars,
     };
 }
 
@@ -191,20 +189,20 @@ function parseObject(
     let tagObj = parseTagObj(tag);
 
     if(tagObj.rawTextOverride) {
-        parentObject.$$children.push(tagObj.rawTextOverride);
+        parentObject[SPECIAL_PREFIX + "children"].push(tagObj.rawTextOverride);
         return;
     }
     if(tagObj.endParent) return true;
 
     let tagObject = Object.create(null);
-    let tagName = tagObject.$$type = tagObj.tagName;
-    delete tagObj.properties[tagObject.$$type];
+    let tagName = tagObject[SPECIAL_PREFIX + "type"] = tagObj.tagName;
 
+    // Properties
     Object.assign(tagObject, tagObj.properties);
 
-    tagObject.$$startChar = tagObj.startChars;
+    tagObject[SPECIAL_PREFIX + "endChars"] = tagObj.endChars;
 
-    tagObject.$$children = [];
+    tagObject[SPECIAL_PREFIX + "children"] = [];
 
     if(!tagObj.endSelf) {
         while(tagIndex.v < tags.length) {
@@ -214,14 +212,25 @@ function parseObject(
         }
     }
 
-    // Arrays
-    parentObject["$_" + tagName] = parentObject["$_" + tagName] || [];
-    parentObject["$_" + tagName].push(tagObject);
+    // First object (optional)
+    if(!(tagName in parentObject)) {
+        parentObject[tagName] = tagObject;
+    }
 
-    // First object
-    parentObject["$" + tagName] = parentObject["$" + tagName] || tagObject;
+    // Array of type
+    let arrayTagName = tagName + "s";
+    // Add $ until we find a free name
+    while(arrayTagName in parentObject && !Array.isArray(parentObject[arrayTagName])) {
+        arrayTagName = "$" + arrayTagName;
+    }
+    parentObject[arrayTagName] = parentObject[arrayTagName] || [];
+    parentObject[arrayTagName].push(tagObject);
 
-    parentObject.$$children.push(tagObject);
+    parentObject[SPECIAL_PREFIX + "children"].push(tagObject);
+
+    if(tagObj.endSelf) {
+        tagObject[SPECIAL_PREFIX + "endSelf"] = true as any;
+    }
 }
 
 function parseXml(
@@ -231,30 +240,133 @@ function parseXml(
 
     let tagIndex = { v: 0 };
     let rootObject = Object.create(null);
-    rootObject.$$children = [];
+    rootObject[SPECIAL_PREFIX + "children"] = [];
     while(tagIndex.v < tags.length) {
         parseObject(rootObject, tags, tagIndex);
     }
-    //console.log(rootObject.$$children[2]);
-    console.log(rootObject.$game.$map.$_territory[10]);
+    return rootObject;
+}
 
-    //todonext;
-    // Hmm... parsing seems to work, so... now go from object back into xml. And remember, children order decides the order, BUT,
-    //  anything as $, or $_, that isn't in children, needs to be added too. Also, properties should be set too.
-    //  ANd you know, remember $$startChar, $$type, etc.
+// https://stackoverflow.com/questions/1091945/what-characters-do-i-need-to-escape-in-xml-documents
+// TODO: We don't need to escape as much as we do, but... w/e
+function escapeXML(value: string, type: "attributeSingle"|"attributeDouble") {
+    if(type === "attributeSingle") {
+        return (
+            value
+                .replace(/'/g, "&apos;")
+                .replace(/</g, "&lt;")
+                .replace(/&/g, "&amp;")
+        );
+    } else if(type === "attributeDouble") {
+        return (
+            value
+                .replace(/"/g, "&quot;")
+                .replace(/</g, "&lt;")
+                .replace(/&/g, "&amp;")
+        );
+    }
+    return (
+        value
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&apos;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/&/g, "&amp;")
+    );
+}
 
+function writeXml(obj: any, tagName: string|null = null, indent: string=""): string {
+    if(typeof obj === "string") {
+        return indent + obj + "\n";
+    }
 
-    //console.log(tags);
+    let endChars = obj[SPECIAL_PREFIX + "endChars"];
+    // We just infer the tag name from the attribute name, if it exists.
+    //  Sometimes this is impossible though, such as for values that only exist in
+    //  children.
+    tagName = tagName || obj[SPECIAL_PREFIX + "type"];
+    let children = obj[SPECIAL_PREFIX + "children"];
+    let endSelf = obj[SPECIAL_PREFIX + "endSelf"];
 
-    // Parse into tags, and contents of tags.
-    //  - Parse each tag into attributes
-    //  - Create objects
-    //  - Etc...
-    // Oh... xml has no tag contents? Huh... okay, that's easy...
+    let output = "";
+
+    // Properties
+    let properties: string[] = [];
+    for(let key in obj) {
+        if(key.startsWith(SPECIAL_PREFIX)) continue;
+        let value = obj[key];
+        if(typeof value === "object") continue;
+        if(value === true) {
+            properties.push(`${key}`);
+        } else {
+            properties.push(`${key}="${escapeXML(value, "attributeDouble")}"`);
+        }
+    }
+
+    if(!tagName && properties.length > 0) {
+        throw new Error(`Unexpected properties in root object, ${properties}`);
+    }
+
+    if(tagName) {
+        output += `${indent}<${tagName}${properties.map(x => " " + x).join("")}`;
+        if(endChars) {
+            output += endChars;
+        }
+        output += `>\n`;
+
+        if(endSelf) {
+            return output;
+        }
+    }
+
+    let childIndent = tagName ? indent + "    " : indent;
+    let childrenAdded: Set<unknown> = new Set();
+    function addChild(child: any, tagName: string|null) {
+        if(childrenAdded.has(child)) return;
+        childrenAdded.add(child);
+        output += writeXml(child, tagName, childIndent);
+    }
+    let childrenTagNames: Map<unknown, string> = new Map();
+    children = children || [];
+    {
+        let existingChildren = new Set(children);
+        for(let key in obj) {
+            if(key.startsWith(SPECIAL_PREFIX)) continue;
+            let value = obj[key];
+            if(typeof value !== "object") continue;
+            function addChild(child: any, tagName: string) {
+                childrenTagNames.set(child, tagName);
+                if(existingChildren.has(child)) return;
+                children.push(child);
+            }
+            if(Array.isArray(value)) {
+                let tagName = key;
+                if(tagName.endsWith("s")) {
+                    tagName = tagName.slice(0, -1);
+                }
+                for(let v of value) {
+                    addChild(v, tagName);
+                }
+            } else {
+                let tagName = key;
+                addChild(value, tagName);
+            }
+        }
+    }
+    
+    for(let child of children) {
+        addChild(child, childrenTagNames.get(child) || null);
+    }
+    
+    if(tagName) {
+        output += `${indent}</${tagName}>\n`;
+    }
+
+    return output;
 }
 
 
-let input = "C:/Users/quent/triplea/downloadedMaps/battle_for_arda-master";
+let input = require("os").homedir() + "/triplea/downloadedMaps/battle_for_arda-master";
 
 
 let file = fs.readFileSync(input + ".zip");
@@ -262,28 +374,23 @@ let file = fs.readFileSync(input + ".zip");
 (async () => {
     let contents = await zip.loadAsync(file)
 
-    let xmlPath = Object.keys(contents.files).filter(x => x.endsWith("TAGX.xml"))[0];
+    let xmlPath = Object.keys(contents.files).filter(x => x.endsWith("Battle_For_Arda.xml"))[0];
     let xmlText = await contents.files[xmlPath].async("text");
 
     let obj = parseXml(xmlText);
-    console.log();
 
+    obj.game.info.name = "+ Middle Earth Without The Lag";
 
+    xmlText = writeXml(obj);
     
-    /*
 
-    let obj = JSON.parse(parser.toJson(xmlText));
-    obj.game.info.name += " - 2";
-    
-    let xml = parser.toXml(obj);
-
-    contents.file(xmlPath, xml);
+    contents.file(xmlPath, xmlText);
 
     let outputBuffer = await contents.generateAsync({ type: "nodebuffer" });
     fs.writeFileSync(input + "-2.zip", outputBuffer as any);
-    */
 
 
+    //fs.copyFileSync(input + ".zip.properties", input + "-2.zip.properties");
 
     //console.log("test");
 
