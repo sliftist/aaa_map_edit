@@ -212,9 +212,12 @@ function parseObject(
         }
     }
 
+    tagObject[SPECIAL_PREFIX + "emitCount"] = 0;
+
     // First object (optional)
     if(!(tagName in parentObject)) {
         parentObject[tagName] = tagObject;
+        tagObject[SPECIAL_PREFIX + "emitCount"]++;
     }
 
     // Array of type
@@ -225,8 +228,10 @@ function parseObject(
     }
     parentObject[arrayTagName] = parentObject[arrayTagName] || [];
     parentObject[arrayTagName].push(tagObject);
+    tagObject[SPECIAL_PREFIX + "emitCount"]++;
 
     parentObject[SPECIAL_PREFIX + "children"].push(tagObject);
+    tagObject[SPECIAL_PREFIX + "emitCount"]++;
 
     if(tagObj.endSelf) {
         tagObject[SPECIAL_PREFIX + "endSelf"] = true as any;
@@ -320,25 +325,33 @@ function writeXml(obj: any, tagName: string|null = null, indent: string=""): str
     }
 
     let childIndent = tagName ? indent + "    " : indent;
-    let childrenAdded: Set<unknown> = new Set();
+    let childrenAdded: Map<unknown, number> = new Map();
+    
     function addChild(child: any, tagName: string|null) {
-        if(childrenAdded.has(child)) return;
-        childrenAdded.add(child);
+        let emitCount = child[SPECIAL_PREFIX + "emitCount"] || 1;
+        if(tagName) {
+            childrenTagNames.set(child, tagName);
+        } else {
+            tagName = childrenTagNames.get(child) || null;
+        }
+        // Basically... if we add it 3 times (the first propery, the type array, and children),
+        //  and they remove it from any place, we want to remove it. But if they added it, we should
+        //  just add it (but only once). This also means the children array order is respected,
+        //  so they can rearrange it in there.
+        let count = (childrenAdded.get(child) || 0) + 1;
+        childrenAdded.set(child, count);
+        if(count !== emitCount) {
+            return;
+        }
         output += writeXml(child, tagName, childIndent);
     }
     let childrenTagNames: Map<unknown, string> = new Map();
     children = children || [];
     {
-        let existingChildren = new Set(children);
         for(let key in obj) {
             if(key.startsWith(SPECIAL_PREFIX)) continue;
             let value = obj[key];
             if(typeof value !== "object") continue;
-            function addChild(child: any, tagName: string) {
-                childrenTagNames.set(child, tagName);
-                if(existingChildren.has(child)) return;
-                children.push(child);
-            }
             if(Array.isArray(value)) {
                 let tagName = key;
                 if(tagName.endsWith("s")) {
@@ -378,8 +391,190 @@ let file = fs.readFileSync(input + ".zip");
     let xmlText = await contents.files[xmlPath].async("text");
 
     let obj = parseXml(xmlText);
+    {
+        obj.game.info.name = "+ Middle Earth Without The Lag";
 
-    obj.game.info.name = "+ Middle Earth Without The Lag";
+        let factionsToRemove: string[] = [
+            "Mordor",
+            "Gondor",
+            "Rohan",
+            "Saruman",
+            "DolGuldur",
+            "Rhun",
+            "Northmen",
+            "WoodlandRealm",
+            //"Dwarves",
+            "Harad",
+        ];
+
+        let territoriesToRemove: string[];
+
+        territoriesToRemove = obj.game.initialize.ownerInitialize.territoryOwners
+            .filter((x: any) => factionsToRemove.includes(x.owner))
+            .map((x: any) => x.territory)
+        ;
+
+        territoriesToRemove = territoriesToRemove.concat([
+            "Andrast",
+            "Lower Lefnui",
+            "Drúwaith Iaur",
+            "Ras Morthil",
+            "Upper Lefnui",
+            "Isen South Bank",
+            "West Ered Nimrais",
+            "Lefnui Vale",
+            "Ered Nimrais",
+            "Nindalf",
+            "Emyn Muil",
+            "Dead Marshes",
+            "South Undeep",
+            "North Undeep",
+            "West Brown Lands",
+            "North Brown Lands",
+            "The Undeeps",
+            "East Brown Lands",
+            "Dagorlad",
+            "East Wilderland",
+            "Drúadan Forest"
+        ]);
+
+        obj.game.playerList.players = obj.game.playerList.players.filter(
+            (x: any) => !(factionsToRemove.includes(x.name))
+        );
+        obj.game.playerList.alliances = obj.game.playerList.alliances.filter(
+            (x: any) => !(factionsToRemove.includes(x.player))
+        );
+
+        obj.game.gamePlay.sequence.steps = obj.game.gamePlay.sequence.steps.filter(
+            (x: any) => !(factionsToRemove.includes(x.player))
+        );
+
+        obj.game.production.playerProductions = obj.game.production.playerProductions.filter(
+            (x: any) => !(factionsToRemove.includes(x.player))
+        );
+
+        for(let attachment of obj.game.attachmentList.attachments) {
+            let players = attachment.options.filter((x: any) => x.name === "players")[0];
+            if(!players) continue;
+            players.value = players.value.split(":").filter((x: any) => !(factionsToRemove.includes(x))).join(":");
+        }
+        let ffa = obj.game.attachmentList.attachments.filter((x: any) => x.name === "triggerAttachment_FFA")[0];
+        ffa.options = ffa.options.filter((x: any) => 
+            !(factionsToRemove.some(y => x.value.includes(y)))
+        );
+
+        for(let attachment of obj.game.attachmentList.attachments) {
+            if(attachment.options.length !== 1) continue;
+            attachment.options[0].value = attachment.options[0].value.split(":").filter((x: any) => !(territoriesToRemove.includes(x))).join(":");
+        }
+
+        let beforeCount = obj.game.map.territorys.length;
+        obj.game.map.territorys = obj.game.map.territorys.filter(
+            (x: any) => !(territoriesToRemove.includes(x.name))
+        );
+        let afterCount = obj.game.map.territorys.length;
+
+        console.log(`${((1 - afterCount/beforeCount) * 100).toFixed(0)}% of territories removed`)
+
+        obj.game.map.connections = obj.game.map.connections.filter(
+            (x: any) => !(territoriesToRemove.includes(x.t1) || territoriesToRemove.includes(x.t2))
+        );
+        obj.game.attachmentList.attachments = obj.game.attachmentList.attachments.filter(
+            (x: any) => !(territoriesToRemove.includes(x.attachTo))
+        );
+        obj.game.attachmentList.attachments = obj.game.attachmentList.attachments.filter(
+            (x: any) => !(factionsToRemove.includes(x.attachTo))
+        );
+        obj.game.initialize.ownerInitialize.territoryOwners = obj.game.initialize.ownerInitialize.territoryOwners.filter(
+            (x: any) => !(territoriesToRemove.includes(x.territory))
+        );
+        obj.game.initialize.unitInitialize.unitPlacements = obj.game.initialize.unitInitialize.unitPlacements.filter(
+            (x: any) => !(territoriesToRemove.includes(x.territory) || factionsToRemove.includes(x.owner))
+        );
+
+        let seaUnitOption = obj.game.propertyList.propertys.filter((x: any) => x.name === "Sea Units")[0];
+        seaUnitOption.value = "false";
+
+        {
+            let option = obj.game.propertyList.propertys.filter((x: any) => x.name === "Free For All")[0];
+            option.value = "true";
+        }
+
+        obj.game.initialize.resourceInitialize.resourceGivens = obj.game.initialize.resourceInitialize.resourceGivens.filter(
+            (x: any) => !(factionsToRemove.includes(x.player))
+        );
+
+        obj.game.attachmentList.attachments = obj.game.attachmentList.attachments.filter((x: any) => {
+            let landTerritories = x.options.filter((x: any) => x.name === "landTerritories")[0];
+            if(!landTerritories) return true;
+            if(territoriesToRemove.some(y => landTerritories.value.includes(y))) {
+                if(x.name.includes("FFA")) {
+                    debugger;
+                }
+                return false;
+            }
+            return true;
+        });
+
+        for(let attachment of obj.game.attachmentList.attachments) {
+            let when = attachment.options.filter((x: any) => x.name === "when")[0];
+            if(!when) continue;
+            if(when.value === "before:sarumanCombatMove") {
+                when.value = "before:gameInitDelegate";
+            }
+        }
+
+        // Reorder the steps to change the player order.
+        let stepsHolder = obj.game.gamePlay.sequence;
+        let steps = stepsHolder[SPECIAL_PREFIX + "children"];
+        let initStep = steps[0];
+        let lastStep = steps[steps.length - 1];
+        let factionSteps = steps.splice(1, steps.length - 2);
+        let stepsByFaction: { [faction: string]: any[] } = Object.create(null); 
+        for(let factionStep of factionSteps) {
+            stepsByFaction[factionStep.player] = stepsByFaction[factionStep.player] || [];
+            stepsByFaction[factionStep.player].push(factionStep);
+        }
+
+        let factionOrder: string[] = [];
+
+        let newFactionSteps: any[] = [];
+
+        let priorityFactions: string[] = ["Angmar", "Orcs", "HighElves"];
+        for(let faction of priorityFactions) {
+            let factionSteps = stepsByFaction[faction];
+            delete stepsByFaction[faction];
+            for(let step of factionSteps) {
+                if(!factionOrder.includes(step.player)) {
+                    factionOrder.push(step.player);
+                }
+                newFactionSteps.push(step);
+            }
+        }
+        for(let faction in stepsByFaction) {
+            let factionSteps = stepsByFaction[faction];
+            delete stepsByFaction[faction];
+            for(let step of factionSteps) {
+                if(!factionOrder.includes(step.player)) {
+                    factionOrder.push(step.player);
+                }
+                newFactionSteps.push(step);
+            }
+        }
+
+        steps.splice(1, 0, ...newFactionSteps);
+
+        console.log(factionOrder);
+
+        //console.log(stepsHolder);
+
+        let v = (x: any) => x.player ? 10000 : factionOrder.indexOf(x.name);
+        obj.game.playerList[SPECIAL_PREFIX + "children"].sort((a: any, b: any) =>
+            v(a) - v(b)
+        );
+
+        // obj.game.playerList.players
+    }
 
     xmlText = writeXml(obj);
     
@@ -389,31 +584,4 @@ let file = fs.readFileSync(input + ".zip");
     let outputBuffer = await contents.generateAsync({ type: "nodebuffer" });
     fs.writeFileSync(input + "-2.zip", outputBuffer as any);
 
-
-    //fs.copyFileSync(input + ".zip.properties", input + "-2.zip.properties");
-
-    //console.log("test");
-
-    //let obj = await xml2js.parseStringPromise(xmlText);
-
-    //obj.game.info[0].$.name += " - Changed";
-
-    //console.log(js2xmlparser.parse("game", obj));
-
-    //console.log(obj);
-
-    /*
-    console.log("zip", file);
-
-    let test = zlib.gzipSync(Buffer.from("test text", "utf8"));
-    console.log("zip", test);
-    console.log(zlib.unzipSync(test));
-    */
-
-    //let output = zlib.gunzipSync(new Uint8Array(file));
-    //console.log(output.toString());
-
-
-    //fs.copyFileSync(input + ".zip", input + "-2.zip");
-    //fs.copyFileSync(input + ".zip.properties", input + "-2.zip.properties");
 })().catch(e => {throw e});
