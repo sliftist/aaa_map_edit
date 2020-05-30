@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+        "outDir": "./dist/",
+        "sourceMap": true,
+        "strict": true,
+        "module": "CommonJS",
+        "esModuleInterop": true,
+        "moduleResolution": "node",
+        // es2017 is the first version that support async. Targetting a lower version
+        //  requires using the generator* wrapper for async, which messes up the callstack
+        //  and makes debugging harder (and is presumably slower than just using async).
+        "target": "es2017",
+        "jsx": "react",
+        "alwaysStrict": true,
+        "jsxFactory": "preact.createElement",
+        //"jsxFactory": "ReactOverride.createElement",
+        "types": [
+            "node"
+        ],
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true
+    },
+    "exclude": ["dist", "node_modules"]
+}
